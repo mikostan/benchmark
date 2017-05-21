@@ -5,6 +5,8 @@
 #include <netdb.h>
 #include <sys/time.h>
 #include <pthread.h>
+#include <algorithm>
+
 
 
 // Usage: ./main host port request_count thread_count
@@ -20,12 +22,12 @@ int check_if_header_ended(char *buffer) {
 
   find_buffer = strstr(buffer, search_string1);
   if (find_buffer != NULL) {
-    printf("Header ended\n");
+    // printf("Header ended\n");
   }
   else {
     find_buffer = strstr(buffer, search_string2);
     if (find_buffer != NULL) {
-      printf("Header ended\n");
+      // printf("Header ended\n");
     }
   }
   return ofset;
@@ -66,7 +68,7 @@ int find_content_length(char *buffer) {
     }
   }
 
-  printf("Content length: %d\n", atoi(content_length));
+  // printf("Content length: %d\n", atoi(content_length));
 
   return atoi(content_length);
 }
@@ -88,9 +90,6 @@ int make_request(char *argv[]) {
   char response_header[512];
 
   sprintf(message,message_format,host,user_agent);
-  // printf("Request:\n%s\n",message);
-
-  // printf("Host: %s, port: %d\n\n", host, portno);
 
   sockfd = socket(AF_INET, SOCK_STREAM, 0);
   if (sockfd < 0) error("ERROR opening socket");
@@ -189,16 +188,16 @@ int make_request(char *argv[]) {
 
 
 int request_count, thread_count, requests_per_thread;
-int **response_times;
+int *response_times;
 
 char **arguments;
 
 void *make_requests(void *arg) {
-  int *thread_index = (int *)arg;
-  printf("Thread %d\n", *thread_index);
+  int thread_start_index = *((int *)arg) * requests_per_thread;
+  int thread_end_index = thread_start_index + requests_per_thread;
 
-  for (int i = 0; i < requests_per_thread; i++) {
-    response_times[*thread_index][i] = make_request(arguments);
+  for (int i = thread_start_index; i < thread_end_index; i++) {
+    response_times[i] = make_request(arguments);
   }
 
   return NULL;
@@ -213,15 +212,20 @@ int main(int argc, char *argv[]) {
 
   requests_per_thread = request_count / thread_count;
 
-  response_times = new int*[thread_count];
+  response_times = new int[thread_count * requests_per_thread];
 
-  for (int i = 0; i < thread_count; i++) {
-    response_times[i] = new int[requests_per_thread];
-  }
+  printf("Request count: %d\n", request_count);
+  printf("Thread count: %d\n", thread_count);
+
+
 
   pthread_t *thread_ids = new pthread_t[thread_count];
   int *thread_indices = new int[thread_count];
 
+  struct timeval t1, t2;
+  double elapsedTime;
+
+  gettimeofday(&t1, NULL);
 
   for (int i = 0; i < thread_count; i++) {
     thread_indices[i] = i;
@@ -231,23 +235,41 @@ int main(int argc, char *argv[]) {
     }
   }
 
-  sleep(1);
-
-
-  printf("Request count: %d\n", request_count);
-  printf("Thread count: %d\n", thread_count);
-
-
   for (int i = 0; i < thread_count; i++) {
-    for (int j = 0; j < requests_per_thread; j++) {
-      printf("Thread = %d, Time = %d us\n", i, response_times[i][j]);
+    if (pthread_join(thread_ids[i], NULL)) {
+      printf("error while joining thread\n");
+      return 1;
     }
   }
 
+  gettimeofday(&t2, NULL);
 
-  for (int i = 0; i < thread_count; i++) {
-    delete[] response_times[i];
+  elapsedTime = (t2.tv_sec - t1.tv_sec);      // sec to ms
+  elapsedTime += (t2.tv_usec - t1.tv_usec) / 1000000.0;   // us to ms
+
+  printf("Elapsed time: %.2f s\n", elapsedTime);
+
+
+
+  float avg_time = 0;
+
+  for (int i = 0; i < thread_count * requests_per_thread; i++) {
+    avg_time += response_times[i];
   }
+
+  std::sort(response_times, response_times + thread_count * requests_per_thread);
+  avg_time = avg_time / (requests_per_thread * thread_count);
+
+  float median_time = response_times[thread_count * requests_per_thread / 2];
+  float min_time = response_times[0];
+  float max_time = response_times[thread_count * requests_per_thread - 1];
+
+  printf("Average time: %.0f us\n", avg_time);
+  printf("Median time:  %.0f us\n", median_time);
+  printf("Min time:     %.0f us\n", min_time);
+  printf("Max time:     %.0f us\n", max_time);
+
+
   delete[] response_times;
   delete[] thread_indices;
 
