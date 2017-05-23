@@ -13,6 +13,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define APP_HEADER_SIZE 1890
+#define MESSAGE_SIZE 6550
+#define ONE_BYTE 1
+
 #define ANSI_COLOR_RED     "\x1b[31m"
 #define ANSI_COLOR_GREEN   "\x1b[32m"
 #define ANSI_COLOR_YELLOW  "\x1b[33m"
@@ -25,7 +29,10 @@ int request_count, thread_count, requests_per_thread;
 int *response_times;
 char **arguments;
 
+//--------------------------------------------------------------------------------
+
 void error(const char *msg) { perror(msg); exit(0); }
+
 //--------------------------------------------------------------------------------
 int check_if_header_ended(char *buffer) {
   const char *search_string1 = "\r\n\r\n";
@@ -92,18 +99,70 @@ int find_content_length(char *buffer) {
 
 //--------------------------------------------------------------------------------
 
+void sendRequest(char message[], int sockfd) {
+  int total = strlen(message);
+  int bytes = -1;
+  int sent = 0;
+  do {
+    bytes = write(sockfd,message+sent,total-sent);
+    if (bytes < 0)
+    error("ERROR writing message to socket");
+    if (bytes == 0)
+      break;
+    sent+=bytes;
+  } while (sent < total);
+}
+
+//--------------------------------------------------------------------------------
+
+void receiveHeader(char whole_header[], int sockfd) {
+  int bytes = -1;
+  int received = 0;
+  int offset=0;
+  char response_header[ONE_BYTE];
+  memset(response_header, 0, sizeof(response_header));
+  memset(whole_header, 0, sizeof(whole_header));
+
+  do {
+    bytes = read(sockfd, response_header, ONE_BYTE);
+    memcpy(whole_header + offset*ONE_BYTE, response_header, ONE_BYTE); offset++;
+    // printf("bytes = %d   |   koniec=%d\n", bytes, check_if_header_ended(whole_header));
+  } while (!check_if_header_ended(whole_header) && bytes==ONE_BYTE);
+}
+
+//--------------------------------------------------------------------------------
+
+void receiveBody(int content_length, int sockfd) {
+  int received = 0;
+  int bytes = -1;
+  char response_body[content_length];
+  do {
+    bytes = read(sockfd, response_body+received, content_length-received);
+    if (bytes < 0)
+      error("ERROR reading response from socket!");
+
+    if (bytes == content_length)
+      break;
+    received+=bytes;
+
+  } while (received < content_length);
+}
+
+//--------------------------------------------------------------------------------
+
 int make_request(char *argv[]) {
   char *host = argv[1];
   int portno = atoi(argv[2]);
-  // int portno = 80;
-  // char *host = "api.somesite.com";
   char *user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X x.y; rv:42.0) Gecko/20100101 Firefox/42.0";
   char *message_format = "PUT /apikey=%s&command=%s HTTP/1.0\r\n\r\n";
-  char message[65535];
-
+  char message[MESSAGE_SIZE];
+  int sockfd;
   struct hostent *server;
   struct sockaddr_in serv_addr;
-  int sockfd, bytes, sent, received, total;
+  struct timeval t1, t2;
+  double elapsedTime;
+  int content_length = -1;
+  char whole_header[APP_HEADER_SIZE];
 
   sprintf(message,message_format,host,user_agent);
 
@@ -122,63 +181,24 @@ int make_request(char *argv[]) {
   if (connect(sockfd,(struct sockaddr *)&serv_addr,sizeof(serv_addr)) < 0)
     error("ERROR connecting");
 
-  //wysłanie żądania
-  total = strlen(message);
-  sent = 0;
-  do {
-    bytes = write(sockfd,message+sent,total-sent);
-    if (bytes < 0)
-    error("ERROR writing message to socket");
-    if (bytes == 0)
-      break;
-    sent+=bytes;
-  } while (sent < total);
-
-  struct timeval t1, t2;
-  double elapsedTime;
+  //wysłanie zapytania HTML
+  sendRequest(message, sockfd);
 
   gettimeofday(&t1, NULL);
 
-  int content_length = -1;
-  int oneBajt = 1;
-  char response_header[oneBajt];
-  char whole_header[1600];
+  //odbiór headera odpowiedzi HTML
+  receiveHeader(whole_header, sockfd);
 
-  //odbiór nagłówka
-  memset(response_header, 0, sizeof(response_header));
-  memset(whole_header, 0, sizeof(whole_header));
-  // total = sizeof(whole_header)-1;
-  received = 0;
-  int licznik=0;
-  do {
-    bytes = read(sockfd, response_header, oneBajt);
-    memcpy(whole_header + licznik*oneBajt, response_header, oneBajt); licznik++;
-    // printf("bytes = %d   |   koniec=%d\n", bytes, check_if_header_ended(whole_header));
-  } while (!check_if_header_ended(whole_header) && bytes==oneBajt);
+  content_length = find_content_length(whole_header);
 
-
-    content_length = find_content_length(whole_header);
-    char response_body[content_length];
-
-  received = 0;
-  do {
-    bytes = read(sockfd, response_body+received, content_length-received);
-    if (bytes < 0)
-      error("ERROR reading response from socket!");
-
-    if (bytes == content_length)
-      break;
-    received+=bytes;
-
-  } while (received < content_length);
+  //odbior body odpowiedzi HTML
+  receiveBody(content_length, sockfd);
 
   gettimeofday(&t2, NULL);
 
   // compute and print the elapsed time in millisec
   elapsedTime = (t2.tv_sec - t1.tv_sec) * 1000000.0;      // sec to ms
   elapsedTime += (t2.tv_usec - t1.tv_usec);   // us to ms
-
-  // printf("Elapsed time: %.0f us\n", elapsedTime);
 
   close(sockfd);
 
@@ -228,11 +248,12 @@ void calculateResult() {
 
 //--------------------------------------------------------------------------------
 
-
 int main(int argc, char *argv[]) {
   request_count = atoi(argv[3]);
   thread_count = atoi(argv[4]);
   arguments = argv;
+  struct timeval t1, t2;
+  double elapsedTime;
 
   requests_per_thread = request_count / thread_count;
   response_times = new int[thread_count * requests_per_thread];
@@ -242,9 +263,6 @@ int main(int argc, char *argv[]) {
   printf(ANSI_COLOR_CYAN "%d\n" ANSI_COLOR_RESET, thread_count);
   pthread_t *thread_ids = new pthread_t[thread_count];
   int *thread_indices = new int[thread_count];
-
-  struct timeval t1, t2;
-  double elapsedTime;
 
   gettimeofday(&t1, NULL);
 
@@ -274,7 +292,6 @@ int main(int argc, char *argv[]) {
 
   delete[] response_times;
   delete[] thread_indices;
-
 
   return 0;
 }
